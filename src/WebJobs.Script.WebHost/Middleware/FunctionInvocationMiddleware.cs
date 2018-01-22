@@ -1,14 +1,16 @@
 ﻿// Copyright (c) .NET Foundation. All rights reserved.
 // Licensed under the MIT License. See License.txt in the project root for license information.
-
+using System;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Authorization.Policy;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Azure.WebJobs.Extensions.Http;
@@ -31,20 +33,75 @@ namespace Microsoft.Azure.WebJobs.Script.WebHost.Middleware
             _next = next;
         }
 
+        public static bool IsHomepageDisabled
+        {
+            get
+            {
+                return string.Equals(Environment.GetEnvironmentVariable(EnvironmentSettingNames.AzureWebJobsDisableHomepage),
+                    bool.TrueString, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
         public async Task Invoke(HttpContext context, WebScriptHostManager manager)
         {
             // flow required context through the request pipeline
             // downstream middleware and filters rely on this
             context.Items.Add(ScriptConstants.AzureFunctionsHostManagerKey, manager);
             SetRequestId(context.Request);
-            await _next(context);
+            if (_next != null)
+            {
+                await _next(context);
+            }
 
             IFunctionExecutionFeature functionExecution = context.Features.Get<IFunctionExecutionFeature>();
 
+            object nestedProxies;
+            context.Items.TryGetValue("X_MS_NestedProxyCount", out nestedProxies);
+
+            //HttpBufferingService is disabled for non - proxy functions.
+            if (functionExecution != null && !functionExecution.Descriptor.Metadata.IsProxy && nestedProxies == null)
+            {
+                    var bufferingFeature = context.Features.Get<IHttpBufferingFeature>();
+                    bufferingFeature?.DisableRequestBuffering();
+                    bufferingFeature?.DisableResponseBuffering();
+            }
+
+            IActionResult result = null;
+
             if (functionExecution != null && !context.Response.HasStarted)
             {
-                IActionResult result = await GetResultAsync(context, functionExecution);
+                result = await GetResultAsync(context, functionExecution);
 
+                // TODO: need some cleanup
+                if (nestedProxies != null && int.Parse(nestedProxies.ToString()) > 0)
+                {
+                    context.Items.Add("X_MS_ProxyResult", result);
+
+                    context.Items["X_MS_NestedProxyCount"] = int.Parse(nestedProxies.ToString()) - 1;
+                    return;
+                }
+            }
+            else if (functionExecution == null
+                && context.Request.Path.Value == "/"
+                && !context.Response.HasStarted)
+            {
+                if (IsHomepageDisabled)
+                {
+                    result = new NoContentResult();
+                }
+                else
+                {
+                    result = new ContentResult()
+                    {
+                        Content = GetHomepage(),
+                        ContentType = "text/html",
+                        StatusCode = 200
+                    };
+                }
+            }
+
+            if (result != null && !context.Response.HasStarted)
+            {
                 var actionContext = new ActionContext
                 {
                     HttpContext = context
@@ -134,6 +191,15 @@ namespace Microsoft.Azure.WebJobs.Script.WebHost.Middleware
         {
             string requestID = request.GetHeaderValueOrDefault(ScriptConstants.AntaresLogIdHeaderName) ?? Guid.NewGuid().ToString();
             request.HttpContext.Items[ScriptConstants.AzureFunctionsRequestIdKey] = requestID;
+        }
+        private string GetHomepage()
+        {
+            var assembly = typeof(FunctionInvocationMiddleware).Assembly;
+            using (Stream resource = assembly.GetManifestResourceStream(assembly.GetName().Name + ".Home.html"))
+            using (var reader = new StreamReader(resource))
+            {
+                return reader.ReadToEnd();
+            }
         }
     }
 }

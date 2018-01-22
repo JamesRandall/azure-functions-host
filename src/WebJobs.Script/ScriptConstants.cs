@@ -72,6 +72,9 @@ namespace Microsoft.Azure.WebJobs.Script
         public const string DynamicSku = "Dynamic";
         public const string DefaultProductionSlotName = "production";
 
+        public const string AzureProxyFunctionLocalRedirectKey = "MS_ProxyLocalRedirectCount";
+        public const int AzureProxyFunctionMaxLocalRedirects = 10;
+
         public const string FeatureFlagDisableShadowCopy = "DisableShadowCopy";
         public const string FeatureFlagsEnableDynamicExtensionLoading = "EnableDynamicExtensionLoading";
 
